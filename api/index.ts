@@ -28,7 +28,9 @@ app.all('/mcp', async (c) => {
     // MCP SDK требует Node.js ServerResponse методы
     let responseSent = false;
     let statusCode = 200;
-    const headers: Record<string, string> = {};
+    const responseHeaders: Record<string, string> = {};
+    let responseBody: any = null;
+    let responseType: 'json' | 'text' | 'empty' = 'empty' as 'json' | 'text' | 'empty';
     
     const adapterResponse = {
       status: (code: number) => {
@@ -37,17 +39,18 @@ app.all('/mcp', async (c) => {
       },
       statusCode: statusCode,
       writeHead: (code: number, headersObj?: Record<string, string> | string[]) => {
+        console.log('adapterResponse.writeHead called, code:', code, 'headers:', headersObj);
         if (!responseSent) {
           statusCode = code;
           if (headersObj) {
             if (Array.isArray(headersObj)) {
               // Массив заголовков [name, value, name2, value2, ...]
               for (let i = 0; i < headersObj.length; i += 2) {
-                headers[headersObj[i] as string] = headersObj[i + 1] as string;
+                responseHeaders[headersObj[i] as string] = headersObj[i + 1] as string;
               }
             } else {
               // Объект заголовков
-              Object.assign(headers, headersObj);
+              Object.assign(responseHeaders, headersObj);
             }
           }
         }
@@ -55,53 +58,51 @@ app.all('/mcp', async (c) => {
       },
       setHeader: (name: string, value: string) => {
         if (!responseSent) {
-          headers[name] = value;
+          responseHeaders[name] = value;
         }
         return adapterResponse;
       },
       getHeader: (name: string) => {
-        return headers[name] || c.req.header(name) || undefined;
+        return responseHeaders[name] || c.req.header(name) || undefined;
       },
       removeHeader: (name: string) => {
-        delete headers[name];
+        delete responseHeaders[name];
       },
       write: (chunk: any) => {
-        // Для streaming ответов
+        if (!responseSent) {
+          if (responseBody === null) {
+            responseBody = '';
+          }
+          responseBody += String(chunk);
+          responseType = 'text';
+        }
         return true;
       },
       end: (chunk?: any) => {
+        console.log('adapterResponse.end called, chunk:', chunk ? String(chunk).substring(0, 200) : 'undefined');
         if (!responseSent) {
           responseSent = true;
-          // Устанавливаем headers через Hono context
-          Object.entries(headers).forEach(([name, value]) => {
-            c.header(name, value);
-          });
-          if (chunk) {
-            return c.text(String(chunk), statusCode as any);
+          if (chunk !== undefined) {
+            responseBody = String(chunk);
+            responseType = 'text';
           }
-          return new Response(null, { status: statusCode });
         }
         return adapterResponse;
       },
       json: (data: any) => {
+        console.log('adapterResponse.json called with:', JSON.stringify(data).substring(0, 200));
         if (!responseSent) {
           responseSent = true;
-          // Устанавливаем headers через Hono context
-          Object.entries(headers).forEach(([name, value]) => {
-            c.header(name, value);
-          });
-          return c.json(data, statusCode as any);
+          responseBody = data;
+          responseType = 'json';
         }
         return adapterResponse;
       },
       send: (data: any) => {
         if (!responseSent) {
           responseSent = true;
-          // Устанавливаем headers через Hono context
-          Object.entries(headers).forEach(([name, value]) => {
-            c.header(name, value);
-          });
-          return c.text(String(data), statusCode as any);
+          responseBody = String(data);
+          responseType = 'text';
         }
         return adapterResponse;
       },
@@ -118,15 +119,30 @@ app.all('/mcp', async (c) => {
     };
 
     // Обрабатываем запрос через MCP transport
+    console.log('Calling transport.handleRequest with body:', JSON.stringify(body, null, 2));
     await transport.handleRequest(webRequest as any, adapterResponse as any, body);
+    console.log('transport.handleRequest completed, responseSent:', responseSent, 'responseType:', responseType, 'statusCode:', statusCode);
     
-    // Если transport не отправил ответ, возвращаем пустой ответ
-    if (!responseSent) {
-      return new Response(null, { status: 200 });
+    // Отправляем ответ на основе того, что было установлено в адаптере
+    if (responseSent) {
+      console.log('Sending response, type:', responseType, 'body length:', responseBody ? JSON.stringify(responseBody).length : 0);
+      // Устанавливаем все заголовки
+      Object.entries(responseHeaders).forEach(([name, value]) => {
+        c.header(name, value);
+      });
+      
+      // Отправляем ответ в зависимости от типа
+      if (responseType === 'json') {
+        return c.json(responseBody, statusCode as any);
+      } else if (responseType === 'text') {
+        return c.text(responseBody || '', statusCode as any);
+      } else {
+        return new Response(null, { status: statusCode, headers: responseHeaders });
+      }
     }
     
-    // Ответ уже отправлен через adapterResponse
-    return c.body(null, 200);
+    // Если transport не отправил ответ, возвращаем пустой ответ
+    return new Response(null, { status: 200 });
   } catch (error) {
     console.error('Error handling MCP request:', error);
     return c.json({

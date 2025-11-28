@@ -25,54 +25,96 @@ app.all('/mcp', async (c) => {
     const webRequest = c.req.raw;
     
     // Создаем адаптер response который работает с Hono context
+    // MCP SDK требует Node.js ServerResponse методы
     let responseSent = false;
+    let statusCode = 200;
+    const headers: Record<string, string> = {};
+    
     const adapterResponse = {
-      status: (code: number) => ({
-        json: (data: any) => {
-          if (!responseSent) {
-            responseSent = true;
-            return c.json(data, { status: code as any });
+      status: (code: number) => {
+        statusCode = code;
+        return adapterResponse;
+      },
+      statusCode: statusCode,
+      writeHead: (code: number, headersObj?: Record<string, string> | string[]) => {
+        if (!responseSent) {
+          statusCode = code;
+          if (headersObj) {
+            if (Array.isArray(headersObj)) {
+              // Массив заголовков [name, value, name2, value2, ...]
+              for (let i = 0; i < headersObj.length; i += 2) {
+                headers[headersObj[i] as string] = headersObj[i + 1] as string;
+              }
+            } else {
+              // Объект заголовков
+              Object.assign(headers, headersObj);
+            }
           }
-          return c;
-        },
-        send: (data: any) => {
-          if (!responseSent) {
-            responseSent = true;
-            return c.text(String(data), { status: code as any });
-          }
-          return c;
-        },
-        end: () => {
-          if (!responseSent) {
-            responseSent = true;
-            return new Response(null, { status: code });
-          }
-          return c;
         }
-      }),
+        return adapterResponse;
+      },
+      setHeader: (name: string, value: string) => {
+        if (!responseSent) {
+          headers[name] = value;
+        }
+        return adapterResponse;
+      },
+      getHeader: (name: string) => {
+        return headers[name] || c.req.header(name) || undefined;
+      },
+      removeHeader: (name: string) => {
+        delete headers[name];
+      },
+      write: (chunk: any) => {
+        // Для streaming ответов
+        return true;
+      },
+      end: (chunk?: any) => {
+        if (!responseSent) {
+          responseSent = true;
+          // Устанавливаем headers через Hono context
+          Object.entries(headers).forEach(([name, value]) => {
+            c.header(name, value);
+          });
+          if (chunk) {
+            return c.text(String(chunk), statusCode as any);
+          }
+          return new Response(null, { status: statusCode });
+        }
+        return adapterResponse;
+      },
       json: (data: any) => {
         if (!responseSent) {
           responseSent = true;
-          return c.json(data);
+          // Устанавливаем headers через Hono context
+          Object.entries(headers).forEach(([name, value]) => {
+            c.header(name, value);
+          });
+          return c.json(data, statusCode as any);
         }
-        return c;
+        return adapterResponse;
       },
       send: (data: any) => {
         if (!responseSent) {
           responseSent = true;
-          return c.text(String(data));
+          // Устанавливаем headers через Hono context
+          Object.entries(headers).forEach(([name, value]) => {
+            c.header(name, value);
+          });
+          return c.text(String(data), statusCode as any);
         }
-        return c;
-      },
-      setHeader: (name: string, value: string) => {
-        // Headers устанавливаются через Hono
         return adapterResponse;
       },
-      getHeader: (name: string) => {
-        return c.req.header(name) || undefined;
-      },
       headersSent: responseSent,
-      on: () => adapterResponse // В serverless окружении события не поддерживаются
+      on: (event: string, handler: () => void) => {
+        // В serverless окружении события не поддерживаются
+        return adapterResponse;
+      },
+      once: (event: string, handler: () => void) => {
+        return adapterResponse;
+      },
+      removeListener: () => adapterResponse,
+      emit: () => false
     };
 
     // Обрабатываем запрос через MCP transport
